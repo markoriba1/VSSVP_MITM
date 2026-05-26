@@ -180,8 +180,15 @@ class CA:
     V fazi 3: strežnik ima CA-podpisan certifikat
     V fazi 5 (mTLS): tudi odjemalci imajo CA-podpisane certifikate
     """
-    def __init__(self):
-        self._key = rsa.generate_private_key(65537, 2048, default_backend())
+    def __init__(self, priv_pem: bytes = None):
+        if priv_pem:
+            # Naloži obstoječ ključ — certifikati iz prejšnjih zagonov ostanejo veljavni
+            self._key = serialization.load_pem_private_key(
+                priv_pem, password=None, backend=default_backend()
+            )
+        else:
+            # Generiraj nov ključ
+            self._key = rsa.generate_private_key(65537, 2048, default_backend())
         self.public_key = self._key.public_key()
 
     def sign(self, identity: str, dh_pub_bytes: bytes) -> dict:
@@ -217,6 +224,14 @@ class CA:
         return self.public_key.public_bytes(
             serialization.Encoding.PEM,
             serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+    def priv_pem(self) -> bytes:
+        """Vrne CA zasebni ključ v PEM formatu (za shranjevanje na strežniku)."""
+        return self._key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption()
         )
 
 class CAVerifier:

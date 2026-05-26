@@ -294,27 +294,75 @@ class ChatServer:
 
         self._remove(sock)
 
-    def run(self):
-        print(f"""
-╔══════════════════════════════════════════════════╗
-║     CHAT STREŽNIK  —  Faza {self.phase}                    ║
-║  {PHASE_DESC[self.phase]:<46} ║
-╚══════════════════════════════════════════════════╝
-  Posluša na {self.host}:{self.port}
-""")
+    def _listen_on(self, port, open_sockets):
         srv = socket.socket()
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((self.host, self.port))
+        srv.bind((self.host, port))
         srv.listen(10)
-        while True:
-            conn, addr = srv.accept()
-            threading.Thread(target=self.handle, args=(conn, addr), daemon=True).start()
+        srv.settimeout(1.0)
+        open_sockets.append(srv)
+        while not self._stop:
+            try:
+                conn, addr = srv.accept()
+                threading.Thread(target=self.handle, args=(conn, addr), daemon=True).start()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
 
+    def run(self, extra_ports=None):
+        """
+        extra_ports: dodatni porti na katerih strežnik posluša.
+        Npr. server.run(extra_ports=[9001]) → Alice na 9000, Bob na 9001 (skozi MITM).
+        Oba odjemalca komunicirata z istim strežnikom — MITM je med njima neviden.
+        """
+        import signal
+        self._stop = False
+        ports = [self.port] + (extra_ports or [])
+        ports_str = " in ".join(str(p) for p in ports)
+
+        print(f"""
+╔═════════════════════════════════════════════════╗
+║     CHAT STRŒŽNIK  —  Faza {self.phase}                    ║
+║  {PHASE_DESC[self.phase]:<46} ║
+╚═════════════════════════════════════════════════╝
+  Posluša na portih: {ports_str}
+  Ustavi z: Ctrl+C
+""")
+        open_sockets = []
+
+        def shutdown(sig=None, frame=None):
+            print(SYS("\n  [SYS] Ugašam strežnik..."))
+            self._stop = True
+            for s in open_sockets:
+                try: s.close()
+                except: pass
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT,  shutdown)
+        signal.signal(signal.SIGTERM, shutdown)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, shutdown)
+
+        threads = []
+        for p in ports:
+            t = threading.Thread(target=self._listen_on, args=(p, open_sockets), daemon=True)
+            t.start()
+            threads.append(t)
+            print(SYS(f"  [SYS] Poslušam na portu {p}"))
+
+        try:
+            for t in threads:
+                t.join()
+        except (KeyboardInterrupt, SystemExit):
+            shutdown()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--host",         default="0.0.0.0")
     ap.add_argument("--port",         type=int, default=9000)
+    ap.add_argument("--extra-ports",  type=int, nargs="+", default=[],
+                    help="Dodatni porti (npr. --extra-ports 9001 9002)")
     ap.add_argument("--phase",        type=int, default=1, choices=range(1, 8))
     ap.add_argument("--ca-pub-out",   default="ca_public.pem")
     ap.add_argument("--long-term-key",default="longterm.key")
@@ -324,11 +372,23 @@ if __name__ == "__main__":
     long_term_key = None
 
     if args.phase in (3, 4, 5, 6, 7):
-        print("[CA] Generiram CA ključ...")
-        ca = DH.CA()
-        with open(args.ca_pub_out, "wb") as f:
-            f.write(ca.pub_pem())
-        print(f"[CA] Javni ključ → '{args.ca_pub_out}'\n")
+        ca_priv_path = "ca_private.pem"
+        if os.path.exists(ca_priv_path):
+            # Naloži obstoječ CA ključ — certifikati iz issue_client_cert.py ostanejo veljavni
+            with open(ca_priv_path, "rb") as f:
+                ca = DH.CA(priv_pem=f.read())
+            print(f"[CA] Naložen obstoječ CA ključ iz '{ca_priv_path}'")
+            print(f"[CA] Certifikati iz prejšnjih zagonov so še veljavni\n")
+        else:
+            # Generiraj nov CA ključ (prvi zagon)
+            print("[CA] Generiram nov CA ključ...")
+            ca = DH.CA()
+            with open(args.ca_pub_out, "wb") as f:
+                f.write(ca.pub_pem())
+            print(f"[CA] Javni ključ  → '{args.ca_pub_out}'")
+            with open(ca_priv_path, "wb") as f:
+                f.write(ca.priv_pem())
+            print(f"[CA] Zasebni ključ → '{ca_priv_path}'  (za issue_client_cert.py)\n")
 
     if args.phase == 2:
         # Generiraj dolgoročni skupni ključ (v praksi bi bil vnaprej izmenjan)
@@ -338,4 +398,4 @@ if __name__ == "__main__":
         print(f"[HMAC] Dolgoročni ključ → '{args.long_term_key}'")
         print(f"[HMAC] Kopiraj to datoteko k odjemalcem!\n")
 
-    ChatServer(args.host, args.port, args.phase, ca, long_term_key).run()
+    ChatServer(args.host, args.port, args.phase, ca, long_term_key).run(extra_ports=args.extra_ports)

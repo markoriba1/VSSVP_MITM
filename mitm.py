@@ -353,17 +353,33 @@ class MITMProxy:
   Odjemalci → port {self.listen_port}
   Ctrl+C za povzetek.
 """)
+        import signal
         srv = socket.socket()
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((self.listen_host, self.listen_port))
         srv.listen(10)
-        try:
-            while True:
-                conn, addr = srv.accept()
-                threading.Thread(target=self.handle, args=(conn, addr), daemon=True).start()
-        except KeyboardInterrupt:
+        srv.settimeout(1.0)
+
+        def shutdown(sig=None, frame=None):
             self.print_summary()
             print(SYS_C("\n  [MITM] Ugašam..."))
+            try: srv.close()
+            except: pass
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT,  shutdown)
+        signal.signal(signal.SIGTERM, shutdown)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, shutdown)
+
+        while True:
+            try:
+                conn, addr = srv.accept()
+                threading.Thread(target=self.handle, args=(conn, addr), daemon=True).start()
+            except socket.timeout:
+                continue
+            except (OSError, KeyboardInterrupt):
+                shutdown()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
